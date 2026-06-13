@@ -52,7 +52,13 @@ final class AgentClient {
                 throw ToolError("agent closed the connection")
             }
             if chunk.isEmpty { continue }  // EINTR
-            for value in lineBuf.append(chunk) {
+            let values: [JSONValue]
+            do {
+                values = try lineBuf.append(chunk)
+            } catch {
+                throw ToolError("agent IPC framing error: \(error)")
+            }
+            for value in values {
                 if let rid = value["id"]?.intValue {
                     pending[rid] = value
                 }
@@ -105,8 +111,11 @@ final class AgentClient {
     ///   3. /Applications/macMCP.app (installed) — `open` it.
     private func launchAgent() {
         if let override = ProcessInfo.processInfo.environment["MACMCP_AGENT_BIN"] {
-            spawn(executable: override, args: [])
-            return
+            if FileManager.default.isExecutableFile(atPath: override) {
+                spawn(executable: override, args: [])
+                return
+            }
+            log("ignoring MACMCP_AGENT_BIN (not an executable file): \(override)")
         }
         let shimDir = (CommandLine.arguments.first.map {
             URL(fileURLWithPath: $0).deletingLastPathComponent().path

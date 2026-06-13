@@ -91,7 +91,8 @@ final class MenuBarController: NSObject, NSMenuDelegate {
             // Resolve the live app for name + Team ID so a menu grant matches a dialog grant.
             let app = core.inventory.runningApps(includeBackground: true).first { $0.gateKey == key }
             let teamID = app?.bundlePath.flatMap { core.inventory.teamID(forBundlePath: $0) }
-            core.permissions.grantFull(key: key, name: app?.name ?? key, teamID: teamID)
+            core.permissions.grantFull(
+                key: key, name: app?.name ?? key, teamID: teamID, bundlePath: app?.bundlePath)
         }
     }
 

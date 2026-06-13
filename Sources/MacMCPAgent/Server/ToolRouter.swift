@@ -35,21 +35,21 @@ final class ToolRouter {
         let key = app.gateKey
         let liveTeamID = app.bundlePath.flatMap { inventory.teamID(forBundlePath: $0) }
 
-        if permissions.tier(for: key) == .full {
-            // Anti-squatting: a stored grant is invalidated if the running app's signing
-            // identity no longer matches what was granted.
-            if let stored = permissions.grant(for: key)?.signingTeamID, let live = liveTeamID,
-                stored != live
-            {
-                permissions.revoke(key: key)
-                log("revoked \(key): signing Team ID changed (\(stored) → \(live))")
-            } else {
+        if permissions.tier(for: key) == .full, let grant = permissions.grant(for: key) {
+            // Fail CLOSED: only honor the grant if the running app's identity still verifies.
+            if identityMatches(grant: grant, app: app, liveTeamID: liveTeamID) {
                 return app
             }
+            permissions.revoke(key: key)  // identity changed or unverifiable → re-prompt
+            log("revoked \(key): identity no longer verifies")
         }
 
         if GrantDialog.prompt(app: app, teamID: liveTeamID) {
-            permissions.grantFull(key: key, name: app.name, teamID: liveTeamID)
+            // Never persist a pure-pid grant: a PID is reusable by a different app later.
+            if !key.hasPrefix("pid:") {
+                permissions.grantFull(
+                    key: key, name: app.name, teamID: liveTeamID, bundlePath: app.bundlePath)
+            }
             return app
         }
         throw ToolError(
@@ -57,6 +57,19 @@ final class ToolRouter {
                 + "or dismissed. Default-tier info (mac_list_apps, mac_app_info, window titles, "
                 + "frontmost) still works; grant Full from the macMCP menu bar, or approve the "
                 + "prompt next time.")
+    }
+
+    /// Fail-closed identity check for a stored Full grant. Signed grants require the live app to
+    /// present the SAME Team ID (a nil live Team ID — couldn't verify — fails). Unsigned/system
+    /// grants bind to the canonical bundle path. A grant with neither identity re-prompts.
+    private func identityMatches(grant g: Grant, app: AppRecord, liveTeamID: String?) -> Bool {
+        if let storedTeam = g.signingTeamID {
+            return liveTeamID == storedTeam
+        }
+        if let storedPath = g.bundlePath {
+            return app.bundlePath == storedPath
+        }
+        return false
     }
 
     private func ensureAXTrust() throws {
@@ -180,11 +193,12 @@ final class ToolRouter {
                         "metadataSource": .string(
                             "lsof (per-app connection metadata: remote host/port/state). No "
                                 + "entitlement or root required; works on every app incl. pinned."),
-                        "bodyCaptureProvisioned": .bool(false),
+                        "bodyCaptureSupported": .bool(false),
                         "bodyCaptureNote": .string(
-                            "Request/response BODY capture (NETransparentProxyProvider system "
-                                + "extension + trusted CA) needs a paid Apple Developer Network "
-                                + "Extension provision; not enabled in this build."),
+                            "Request/response BODY capture is out of scope — it would need a "
+                                + "transparent-proxy system extension + a trusted root CA (and "
+                                + "still fails on cert-pinned apps). macMCP provides connection "
+                                + "metadata only."),
                     ]))
             })
     }
@@ -213,6 +227,14 @@ final class ToolRouter {
                 if a.bool("bringToFront") == true { activate(pid: app.pid) }
                 let png: Data
                 if let windowId = a.int("windowId") {
+                    // Security: only let a granted app screenshot its OWN windows — never an
+                    // arbitrary windowId that happens to belong to a different (ungranted) app.
+                    guard inventory.windows(forPID: app.pid).contains(where: { $0.windowId == windowId })
+                    else {
+                        throw ToolError(
+                            "Window \(windowId) is not owned by \(app.name) (pid \(app.pid)). "
+                                + "You may only screenshot the granted app's own windows.")
+                    }
                     png = try ScreenCapture.capturePNG(windowID: windowId)
                 } else {
                     png = try ScreenCapture.capturePNG(pid: app.pid)
@@ -239,7 +261,8 @@ final class ToolRouter {
                 let app = try requireFull(a)
                 try ensureAXTrust()
                 let snapshot = try AXController.snapshot(
-                    pid: app.pid, maxElements: a.int("maxElements") ?? 200)
+                    pid: app.pid,
+                    maxElements: clampInt(a.int("maxElements"), default: 200, min: 1, max: 5000))
                 return .text(jsonText(snapshot))
             })
 
@@ -262,7 +285,8 @@ final class ToolRouter {
                 try ensureAXTrust()
                 let query = try a.requiredString("query")
                 let found = try AXController.find(
-                    pid: app.pid, query: query, role: a.string("role"), max: a.int("max") ?? 25)
+                    pid: app.pid, query: query, role: a.string("role"),
+                    max: clampInt(a.int("max"), default: 25, min: 1, max: 1000))
                 return .text(jsonText(found))
             })
     }
@@ -301,7 +325,7 @@ final class ToolRouter {
                 let app = try requireFull(a)
                 try ensureAXTrust()
                 let button = mouseButton(a.string("button"))
-                let clicks = a.int("clicks") ?? 1
+                let clicks = clampInt(a.int("clicks"), default: 1, min: 1, max: 3)
                 if let ref = a.string("ref") {
                     // Tier A: semantic AX press (single left-click only).
                     if case .left = button, clicks == 1,
@@ -347,7 +371,7 @@ final class ToolRouter {
                 let a = Args(raw)
                 let app = try requireFull(a)
                 try ensureAXTrust()
-                let text = try a.requiredString("text")
+                let text = try checkedText(a.requiredString("text"))
                 if let ref = a.string("ref") {
                     if (try? AXController.setValue(ref: ref, pid: app.pid, text)) == true {
                         if a.bool("submit") == true {
@@ -381,7 +405,7 @@ final class ToolRouter {
                 let app = try requireFull(a)
                 try ensureAXTrust()
                 let combo = try a.requiredString("combo")
-                let n = max(1, a.int("repeat") ?? 1)
+                let n = clampInt(a.int("repeat"), default: 1, min: 1, max: 1000)
                 for _ in 0..<n { try InputControl.pressKey(pid: app.pid, combo: combo) }
                 return .text("Pressed \(combo)\(n > 1 ? " ×\(n)" : "") on \(app.name).")
             })
@@ -404,7 +428,7 @@ final class ToolRouter {
                 let app = try requireFull(a)
                 try ensureAXTrust()
                 let dir = try a.requiredString("direction").lowercased()
-                let amount = Int32(a.int("amount") ?? 5)
+                let amount = Int32(clampInt(a.int("amount"), default: 5, min: 0, max: 10000))
                 var dx: Int32 = 0
                 var dy: Int32 = 0
                 switch dir {
@@ -479,7 +503,7 @@ final class ToolRouter {
                     return .text("\(action) at pixel (\(a.int("x") ?? 0),\(a.int("y") ?? 0)).")
                 case "type":
                     try ensureAXTrust()
-                    try InputControl.typeText(pid: app.pid, try a.requiredString("text"))
+                    try InputControl.typeText(pid: app.pid, try checkedText(a.requiredString("text")))
                     return .text("Typed into \(app.name).")
                 case "key":
                     try ensureAXTrust()
@@ -490,7 +514,7 @@ final class ToolRouter {
                     let p =
                         (a.int("x") != nil && a.int("y") != nil)
                         ? try globalPoint() : CGPoint(x: map.bounds.midX, y: map.bounds.midY)
-                    let amount = Int32(a.int("amount") ?? 5)
+                    let amount = Int32(clampInt(a.int("amount"), default: 5, min: 0, max: 10000))
                     var dx: Int32 = 0
                     var dy: Int32 = 0
                     switch (a.string("direction") ?? "down").lowercased() {
@@ -516,9 +540,9 @@ final class ToolRouter {
                 description:
                     "Current network connections of a granted app (remote host/port/state) via "
                     + "lsof — the 'what is this app talking to' view. Works on every app including "
-                    + "cert-pinned ones (Lark/Slack). Request/response BODIES require the "
-                    + "transparent-proxy system extension (a paid Apple Developer NE provision) "
-                    + "and are not available in this build. Full-tier.",
+                    + "cert-pinned ones (Lark/Slack). Connection metadata only — request/response "
+                    + "BODIES are out of scope (would need a transparent-proxy system extension + "
+                    + "trusted CA). Full-tier.",
                 inputSchema: schema([
                     "bundleId": prop("string", "Target app bundle id."),
                     "pid": prop("integer", "Target app process id."),
@@ -536,7 +560,7 @@ final class ToolRouter {
                         ($0["remoteHost"]?.stringValue ?? "").lowercased().contains(needle)
                     }
                 }
-                let limit = a.int("limit") ?? 100
+                let limit = clampInt(a.int("limit"), default: 100, min: 0, max: 5000)
                 if conns.count > limit { conns = Array(conns.prefix(limit)) }
                 return .text(
                     jsonText([
@@ -544,12 +568,27 @@ final class ToolRouter {
                         "pid": .int(app.pid),
                         "mode": .string("metadata"),
                         "note": .string(
-                            "Connection metadata only (no bodies). Body capture needs the "
-                                + "transparent-proxy system extension (Phase 4b)."),
+                            "Connection metadata only (no bodies). Body capture is out of scope "
+                                + "(would need a transparent-proxy system extension + trusted CA)."),
                         "count": .int(conns.count),
                         "connections": .array(conns),
                     ]))
             })
+    }
+
+    /// Clamp an optional Int argument into a safe range — defends against hostile/out-of-range
+    /// values arriving over the IPC (negative limits, huge counts) that could crash the agent
+    /// (e.g. Array.prefix(-1), Int32 overflow) or starve the work queue.
+    private func clampInt(_ v: Int?, default d: Int, min lo: Int, max hi: Int) -> Int {
+        Swift.max(lo, Swift.min(hi, v ?? d))
+    }
+
+    private static let maxTextLength = 100_000
+    private func checkedText(_ s: String) throws -> String {
+        guard s.count <= Self.maxTextLength else {
+            throw ToolError("text too long (max \(Self.maxTextLength) characters).")
+        }
+        return s
     }
 
     private func mouseButton(_ s: String?) -> MouseButton {

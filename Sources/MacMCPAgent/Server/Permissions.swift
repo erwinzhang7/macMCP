@@ -12,6 +12,7 @@ enum Tier: String {
 struct Grant {
     var tier: Tier
     var signingTeamID: String?
+    var bundlePath: String?  // canonical path at grant time — binds unsigned/system-app grants
     var name: String
     var grantedAt: String  // ISO-8601
 
@@ -22,6 +23,7 @@ struct Grant {
             "grantedAt": .string(grantedAt),
         ]
         if let signingTeamID { o["signingTeamID"] = .string(signingTeamID) }
+        if let bundlePath { o["bundlePath"] = .string(bundlePath) }
         return .object(o)
     }
 }
@@ -65,10 +67,11 @@ final class Permissions {
         return .object(o)
     }
 
-    func grantFull(key: String, name: String, teamID: String?) {
+    func grantFull(key: String, name: String, teamID: String?, bundlePath: String?) {
         mutate {
             grants[key] = Grant(
-                tier: .full, signingTeamID: teamID, name: name, grantedAt: Self.now())
+                tier: .full, signingTeamID: teamID, bundlePath: bundlePath, name: name,
+                grantedAt: Self.now())
         }
     }
 
@@ -98,6 +101,7 @@ final class Permissions {
             out[k] = Grant(
                 tier: tier,
                 signingTeamID: v["signingTeamID"]?.stringValue,
+                bundlePath: v["bundlePath"]?.stringValue,
                 name: v["name"]?.stringValue ?? k,
                 grantedAt: v["grantedAt"]?.stringValue ?? "")
         }

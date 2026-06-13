@@ -66,12 +66,26 @@ enum NetworkMonitor {
             throw ToolError("Could not run \(executable): \(error)")
         }
 
-        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-        let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        // Drain stderr concurrently so a full stderr pipe can't deadlock the stdout read, and
+        // run a watchdog that terminates a wedged child so it can't block the work queue.
+        let errGroup = DispatchGroup()
+        var stderrData = Data()
+        errGroup.enter()
+        DispatchQueue.global().async {
+            stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+            errGroup.leave()
+        }
+        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5, execute: watchdog)
 
-        let out = String(data: stdoutData, encoding: .utf8) ?? ""
-        let err = String(data: stderrData, encoding: .utf8) ?? ""
+        let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        watchdog.cancel()
+        errGroup.wait()
+
+        let maxOutput = 4 * 1024 * 1024  // bound: lsof output is small, but never unbounded
+        let out = String(data: stdoutData.prefix(maxOutput), encoding: .utf8) ?? ""
+        let err = String(data: stderrData.prefix(64 * 1024), encoding: .utf8) ?? ""
 
         if process.terminationStatus != 0 {
             let message = err.trimmingCharacters(in: .whitespacesAndNewlines)

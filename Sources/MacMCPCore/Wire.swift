@@ -14,8 +14,23 @@ public enum AgentPaths {
     }
 
     public static func ensureSupportDir() {
+        let dir = supportDir
+        // 0700: the dir holds the agent socket + the permission allowlist — keep it owner-only.
         try? FileManager.default.createDirectory(
-            at: supportDir, withIntermediateDirectories: true)
+            at: dir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700])
+        try? FileManager.default.setAttributes(
+            [.posixPermissions: 0o700], ofItemAtPath: dir.path)
+    }
+}
+
+/// IPC framing errors.
+public enum WireError: Error, CustomStringConvertible {
+    case frameTooLarge(Int)
+    public var description: String {
+        switch self {
+        case .frameTooLarge(let n): return "IPC frame exceeded \(n) bytes without a newline"
+        }
     }
 }
 
@@ -55,10 +70,16 @@ public enum Wire {
 /// instance per connection (the shim's client and each of the agent's accepted connections).
 public final class LineBuffer {
     private var buf = Data()
-    public init() {}
+    private let maxBytes: Int
+
+    /// `maxBytes` bounds a single un-terminated frame so a misbehaving/hostile peer can't grow
+    /// the buffer without limit (memory DoS). 64 MB comfortably fits a base64 screenshot result
+    /// while staying bounded; requests are tiny.
+    public init(maxBytes: Int = 64 * 1024 * 1024) { self.maxBytes = maxBytes }
 
     /// Feed a chunk of bytes; returns every complete JSON line now available.
-    public func append(_ data: Data) -> [JSONValue] {
+    /// Throws `WireError.frameTooLarge` if a single frame exceeds the cap (caller should close).
+    public func append(_ data: Data) throws -> [JSONValue] {
         buf.append(data)
         var out: [JSONValue] = []
         while let nl = buf.firstIndex(of: 0x0A) {
@@ -66,6 +87,10 @@ public final class LineBuffer {
             let next = buf.index(after: nl)
             buf = next < buf.endIndex ? Data(buf[next...]) : Data()
             if !lineData.isEmpty, let v = try? JSONValue.decode(lineData) { out.append(v) }
+        }
+        if buf.count > maxBytes {
+            buf.removeAll(keepingCapacity: false)
+            throw WireError.frameTooLarge(maxBytes)
         }
         return out
     }

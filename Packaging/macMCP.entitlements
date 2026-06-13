@@ -2,7 +2,9 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Phase 4 will add Network Extension entitlements: com.apple.developer.networking.networkextension = [transparent-proxy-systemextension], com.apple.developer.system-extension.install. -->
+	<!-- Not sandboxed: the agent needs Accessibility, ScreenCaptureKit, NSWorkspace, and
+	     CGEvent. macMCP does network METADATA only (lsof), so it needs no Network Extension
+	     entitlements and no paid Apple Developer provision. -->
 	<key>com.apple.security.app-sandbox</key>
 	<false/>
 </dict>

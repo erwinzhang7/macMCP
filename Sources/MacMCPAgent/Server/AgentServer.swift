@@ -17,6 +17,9 @@ final class AgentServer {
     private var serverFD: Int32 = -1
     private let lock = NSLock()
     private var connectionFDs: Set<Int32> = []
+    /// Cap concurrent shim connections so a flood of same-user connections can't exhaust
+    /// threads/fds. Real use is a handful of sessions.
+    private let maxConnections = 32
 
     init(socketPath: String, dispatch: @escaping (JSONValue) -> JSONValue) {
         self.socketPath = socketPath
@@ -43,7 +46,15 @@ final class AgentServer {
         while true {
             do {
                 guard let fd = try UnixSocket.accept(serverFD) else { continue }
-                lock.lock(); connectionFDs.insert(fd); lock.unlock()
+                lock.lock()
+                let atCapacity = connectionFDs.count >= maxConnections
+                if !atCapacity { connectionFDs.insert(fd) }
+                lock.unlock()
+                if atCapacity {
+                    log("rejecting connection: at capacity (\(maxConnections))")
+                    close(fd)
+                    continue
+                }
                 let t = Thread { [weak self] in self?.serve(fd) }
                 t.name = "macmcp.agent.conn"
                 t.stackSize = 1 << 20
@@ -72,7 +83,14 @@ final class AgentServer {
             }
             guard let chunk else { return }  // EOF
             if chunk.isEmpty { continue }  // EINTR
-            for request in lineBuf.append(chunk) {
+            let requests: [JSONValue]
+            do {
+                requests = try lineBuf.append(chunk)
+            } catch {
+                log("framing error on fd \(fd): \(error) — closing")
+                return
+            }
+            for request in requests {
                 let response = dispatch(request)
                 do {
                     try UnixSocket.writeAll(fd, Wire.frame(response))

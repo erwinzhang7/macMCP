@@ -18,6 +18,8 @@ final class AgentCore {
     let router: ToolRouter
     private var server: AgentServer?
     private let workQueue = DispatchQueue(label: "macmcp.work")
+    /// Held for the process lifetime so the single-instance flock isn't released early.
+    private static var lockFD: Int32 = -1
 
     init() {
         router = ToolRouter(inventory: inventory, permissions: permissions)
@@ -25,11 +27,7 @@ final class AgentCore {
 
     /// Single-instance guard, then bind + serve. Exits the process if another agent is live.
     func start() {
-        if let existing = try? UnixSocket.connect(path: AgentPaths.socketPath) {
-            close(existing)
-            log("another agent is already running — exiting")
-            exit(0)
-        }
+        acquireSingleInstanceLock()  // exits if another agent already holds the lock
         let srv = AgentServer(socketPath: AgentPaths.socketPath) { [weak self] req in
             guard let self else {
                 return Wire.errorResponse(id: req["id"]?.intValue ?? 0, message: "agent gone")
@@ -47,6 +45,24 @@ final class AgentCore {
     }
 
     var connectionCount: Int { server?.connectionCount ?? 0 }
+
+    /// flock-based single instance: robust against a spoofed/stale socket (a fake socket can't
+    /// make us exit, and a crashed agent's lock is auto-released by the kernel). The connect-probe
+    /// it replaces could be tricked into exiting by any same-user process binding the path first.
+    private func acquireSingleInstanceLock() {
+        let lockPath = AgentPaths.supportDir.appendingPathComponent("agent.lock").path
+        let fd = open(lockPath, O_CREAT | O_RDWR, 0o600)
+        guard fd >= 0 else {
+            log("could not open lock \(lockPath): \(String(cString: strerror(errno))) — continuing")
+            return
+        }
+        if flock(fd, LOCK_EX | LOCK_NB) != 0 {
+            log("another agent already holds the lock — exiting")
+            close(fd)
+            exit(0)
+        }
+        Self.lockFD = fd  // keep open for the process lifetime
+    }
 
     private func dispatch(_ req: JSONValue) -> JSONValue {
         let id = req["id"]?.intValue ?? 0
