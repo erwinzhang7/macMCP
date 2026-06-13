@@ -19,6 +19,8 @@ SOCK = os.path.expanduser("~/Library/Application Support/macMCP/agent.sock")
 DEFAULT_TIER_TOOLS = {
     "mac_list_apps", "mac_app_info", "mac_list_windows", "mac_permissions", "mac_network_status",
 }
+FULL_TIER_TOOLS = {"mac_screenshot", "mac_read_ui", "mac_find_element"}
+ALL_TOOLS = DEFAULT_TIER_TOOLS | FULL_TIER_TOOLS
 
 REQUESTS = [
     {"jsonrpc": "2.0", "id": 1, "method": "initialize",
@@ -91,8 +93,8 @@ def main():
 
     tools = responses.get(2, {}).get("result", {}).get("tools", [])
     names = {t["name"] for t in tools}
-    check(f"tools/list returns the {len(DEFAULT_TIER_TOOLS)} default-tier tools",
-          names == DEFAULT_TIER_TOOLS, str(sorted(names)))
+    check(f"tools/list returns all {len(ALL_TOOLS)} tools (default + full tier)",
+          names == ALL_TOOLS, str(sorted(names)))
     check("every tool has an object inputSchema",
           all(t.get("inputSchema", {}).get("type") == "object" for t in tools), "")
     check("every tool has a non-empty description",
