@@ -1,0 +1,38 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.moved-aside
+
+# Sockets / runtime
+*.sock
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+Package.resolved
+
+# Python
+__pycache__/
+*.pyc
+
+# Packaged app bundle (regenerate with scripts/package-app.sh)
+/macMCP.app/
+
+# AI coding-assistant artifacts (configs, rules, session/scratch files) — keep them
+# out of the repo so they're never committed by accident.
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.codex/
+.cursor/
+.cursorrules
+.aider*
+.continue/
+.windsurf*
+.github/copilot-instructions.md
