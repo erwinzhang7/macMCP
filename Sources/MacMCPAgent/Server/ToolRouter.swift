@@ -20,6 +20,7 @@ final class ToolRouter {
         registerDefaultTier()
         registerFullTier()
         registerInputTier()
+        registerNetworkTier()
     }
 
     // MARK: - Permission gate
@@ -175,10 +176,15 @@ final class ToolRouter {
             ) { _ in
                 .text(
                     jsonText([
-                        "provisioned": .bool(false),
-                        "note": .string(
-                            "Network capture lands in Phase 4 (NETransparentProxyProvider system "
-                                + "extension). Not yet provisioned."),
+                        "metadataMode": .bool(true),
+                        "metadataSource": .string(
+                            "lsof (per-app connection metadata: remote host/port/state). No "
+                                + "entitlement or root required; works on every app incl. pinned."),
+                        "bodyCaptureProvisioned": .bool(false),
+                        "bodyCaptureNote": .string(
+                            "Request/response BODY capture (NETransparentProxyProvider system "
+                                + "extension + trusted CA) needs a paid Apple Developer Network "
+                                + "Extension provision; not enabled in this build."),
                     ]))
             })
     }
@@ -498,6 +504,51 @@ final class ToolRouter {
                 default:
                     throw ToolError("Unknown action '\(action)'.")
                 }
+            })
+    }
+
+    // MARK: - Network tier (Full) — metadata only (Phase 4a)
+
+    private func registerNetworkTier() {
+        registry.register(
+            ToolSpec(
+                name: "mac_read_network",
+                description:
+                    "Current network connections of a granted app (remote host/port/state) via "
+                    + "lsof — the 'what is this app talking to' view. Works on every app including "
+                    + "cert-pinned ones (Lark/Slack). Request/response BODIES require the "
+                    + "transparent-proxy system extension (a paid Apple Developer NE provision) "
+                    + "and are not available in this build. Full-tier.",
+                inputSchema: schema([
+                    "bundleId": prop("string", "Target app bundle id."),
+                    "pid": prop("integer", "Target app process id."),
+                    "remoteHostContains": prop(
+                        "string", "Only connections whose remote host contains this substring."),
+                    "limit": prop("integer", "Max connections returned. Default 100."),
+                ])
+            ) { [self] raw in
+                let a = Args(raw)
+                let app = try requireFull(a)
+                let result = try NetworkMonitor.connections(pid: app.pid)
+                var conns = result["connections"]?.arrayValue ?? []
+                if let needle = a.string("remoteHostContains")?.lowercased(), !needle.isEmpty {
+                    conns = conns.filter {
+                        ($0["remoteHost"]?.stringValue ?? "").lowercased().contains(needle)
+                    }
+                }
+                let limit = a.int("limit") ?? 100
+                if conns.count > limit { conns = Array(conns.prefix(limit)) }
+                return .text(
+                    jsonText([
+                        "app": .string(app.bundleId ?? app.name),
+                        "pid": .int(app.pid),
+                        "mode": .string("metadata"),
+                        "note": .string(
+                            "Connection metadata only (no bodies). Body capture needs the "
+                                + "transparent-proxy system extension (Phase 4b)."),
+                        "count": .int(conns.count),
+                        "connections": .array(conns),
+                    ]))
             })
     }
 

@@ -21,7 +21,8 @@ DEFAULT_TIER_TOOLS = {
 }
 FULL_TIER_TOOLS = {"mac_screenshot", "mac_read_ui", "mac_find_element"}
 INPUT_TIER_TOOLS = {"mac_click", "mac_type", "mac_scroll", "mac_key", "mac_computer"}
-ALL_TOOLS = DEFAULT_TIER_TOOLS | FULL_TIER_TOOLS | INPUT_TIER_TOOLS
+NETWORK_TIER_TOOLS = {"mac_read_network"}
+ALL_TOOLS = DEFAULT_TIER_TOOLS | FULL_TIER_TOOLS | INPUT_TIER_TOOLS | NETWORK_TIER_TOOLS
 
 REQUESTS = [
     {"jsonrpc": "2.0", "id": 1, "method": "initialize",
