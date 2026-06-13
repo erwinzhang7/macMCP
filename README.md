@@ -42,11 +42,14 @@ Built in phases (see `PLAN`):
 ```sh
 make build      # swift build (macmcp + macmcp-agent)
 make test       # protocol self-test (shim ⇄ agent over the socket)
-make install    # release build + `claude mcp add macmcp` (dev: shim auto-launches the agent)
+make package    # release build + signed ./macMCP.app bundle
+make install    # install /Applications/macMCP.app + register the release shim with Claude Code
 ```
 
-In development the shim auto-launches the sibling `macmcp-agent` binary (or set
-`MACMCP_AGENT_BIN` to point at one). The full menu-bar `.app` install lands with Phase 2.
+The installed app owns macOS TCC grants for Accessibility and Screen Recording. By default
+the bundle is ad-hoc signed; set `MACMCP_SIGN_IDENTITY` to a stable code-signing identity
+before `make package` or `make install` if you want to grant those permissions once and keep
+them across rebuilds.
 
 ## Requirements
 
