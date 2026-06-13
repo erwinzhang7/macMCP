@@ -68,6 +68,62 @@ enum AXController {
         return elementCache[cacheKey(pid: pid, ref: ref)]
     }
 
+    /// Perform AXPress on a cached Accessibility element when the action is available.
+    static func press(ref: String, pid: Int) throws -> Bool {
+        guard let element = element(forRef: ref, pid: pid) else { return false }
+        var names: CFArray?
+        let namesError = AXUIElementCopyActionNames(element, &names)
+        guard namesError == .success else {
+            throw ToolError("Could not read actions for Accessibility ref '\(ref)': \(namesError).")
+        }
+        let actions = (names as? [String]) ?? []
+        guard actions.contains(kAXPressAction as String) else { return false }
+
+        let error = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        guard error == .success else {
+            throw ToolError("Could not press Accessibility ref '\(ref)': \(error).")
+        }
+        return true
+    }
+
+    /// Set AXValue on a cached Accessibility element when the attribute accepts it.
+    static func setValue(ref: String, pid: Int, _ value: String) throws -> Bool {
+        guard let element = element(forRef: ref, pid: pid) else { return false }
+        let error = AXUIElementSetAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            value as CFTypeRef)
+        switch error {
+        case .success:
+            return true
+        case .illegalArgument, .attributeUnsupported:
+            return false
+        default:
+            throw ToolError("Could not set value for Accessibility ref '\(ref)': \(error).")
+        }
+    }
+
+    /// Focus a cached Accessibility element.
+    static func focus(ref: String, pid: Int) throws {
+        guard let element = element(forRef: ref, pid: pid) else { return }
+        let error = AXUIElementSetAttributeValue(
+            element,
+            kAXFocusedAttribute as CFString,
+            kCFBooleanTrue)
+        guard error == .success else {
+            throw ToolError("Could not focus Accessibility ref '\(ref)': \(error).")
+        }
+    }
+
+    /// Return the frame of a cached Accessibility element in global display coordinates.
+    static func frame(ref: String, pid: Int) -> CGRect? {
+        guard let element = element(forRef: ref, pid: pid),
+            let position = pointAttribute(element, kAXPositionAttribute),
+            let size = sizeAttribute(element, kAXSizeAttribute)
+        else { return nil }
+        return CGRect(origin: position, size: size)
+    }
+
     // MARK: - Collection
 
     private static func collect(
