@@ -71,3 +71,9 @@ the socket, so treat the granted set like any local capability you hold.
 ## Requirements
 
 macOS 14+. No third-party dependencies; no paid Apple Developer account required.
+
+## License
+
+Licensed under the Apache License, Version 2.0 — see [LICENSE](LICENSE).
+
+Copyright © 2026 Erwin Zhang.
