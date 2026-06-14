@@ -21,6 +21,100 @@ final class ToolRouter {
         registerFullTier()
         registerInputTier()
         registerNetworkTier()
+        registerFlowTier()
+        registerWindowTier()
+    }
+
+    // MARK: - Window + drag tier (Full)
+
+    private func registerWindowTier() {
+        registry.register(
+            ToolSpec(
+                name: "mac_drag",
+                description:
+                    "Press-drag-release in a granted app between two global screen points "
+                    + "(points, top-left) — for sliders, canvas drawing, reordering, resize "
+                    + "handles, drag-and-drop. NOTE: a drag uses a real mouse-down, so it WILL "
+                    + "raise the window (unavoidable). Full-tier.",
+                inputSchema: schema([
+                    "bundleId": prop("string", "Target app bundle id."),
+                    "pid": prop("integer", "Target app process id."),
+                    "fromX": prop("number", "Start X (global points)."),
+                    "fromY": prop("number", "Start Y (global points)."),
+                    "toX": prop("number", "End X (global points)."),
+                    "toY": prop("number", "End Y (global points)."),
+                    "button": prop("string", "left|right|center. Default left."),
+                    "steps": prop("integer", "Interpolation steps. Default 20."),
+                ])
+            ) { [self] raw in
+                let a = Args(raw)
+                let app = try requireFull(a)
+                try ensureAXTrust()
+                guard let fx = a.double("fromX"), let fy = a.double("fromY"),
+                    let tx = a.double("toX"), let ty = a.double("toY")
+                else {
+                    throw ToolError("mac_drag needs fromX, fromY, toX, toY (global screen points).")
+                }
+                try InputControl.drag(
+                    pid: app.pid, from: CGPoint(x: fx, y: fy), to: CGPoint(x: tx, y: ty),
+                    steps: clampInt(a.int("steps"), default: 20, min: 1, max: 200),
+                    button: mouseButton(a.string("button")), flags: [])
+                return .text(
+                    "Dragged (\(Int(fx)),\(Int(fy))) → (\(Int(tx)),\(Int(ty))) on \(app.name).")
+            })
+
+        registry.register(
+            ToolSpec(
+                name: "mac_window",
+                description:
+                    "Manage a granted app's window via Accessibility. action: "
+                    + "move|resize|minimize|unminimize|close|raise|list. Target by 'title' "
+                    + "substring, else the focused/main window. move/resize/minimize do NOT raise "
+                    + "or steal focus; only 'raise' brings the window forward. Full-tier.",
+                inputSchema: schema([
+                    "bundleId": prop("string", "Target app bundle id."),
+                    "pid": prop("integer", "Target app process id."),
+                    "action": prop(
+                        "string", "move|resize|minimize|unminimize|close|raise|list (required)."),
+                    "title": prop("string", "Match a window by title substring (optional)."),
+                    "x": prop("number", "move: new X (global points, top-left)."),
+                    "y": prop("number", "move: new Y (global points, top-left)."),
+                    "width": prop("number", "resize: new width (points)."),
+                    "height": prop("number", "resize: new height (points)."),
+                ])
+            ) { [self] raw in
+                let a = Args(raw)
+                let app = try requireFull(a)
+                try ensureAXTrust()
+                let title = a.string("title")
+                switch try a.requiredString("action").lowercased() {
+                case "list":
+                    return .text(jsonText(["windows": WindowControl.list(pid: app.pid)]))
+                case "move":
+                    guard let x = a.double("x"), let y = a.double("y") else {
+                        throw ToolError("move needs x,y (global points).")
+                    }
+                    return .text(
+                        try WindowControl.move(pid: app.pid, title: title, to: CGPoint(x: x, y: y)))
+                case "resize":
+                    guard let w = a.double("width"), let h = a.double("height") else {
+                        throw ToolError("resize needs width,height (points).")
+                    }
+                    return .text(
+                        try WindowControl.resize(
+                            pid: app.pid, title: title, to: CGSize(width: w, height: h)))
+                case "minimize":
+                    return .text(try WindowControl.setMinimized(pid: app.pid, title: title, true))
+                case "unminimize":
+                    return .text(try WindowControl.setMinimized(pid: app.pid, title: title, false))
+                case "close":
+                    return .text(try WindowControl.close(pid: app.pid, title: title))
+                case "raise":
+                    return .text(try WindowControl.raise(pid: app.pid, title: title))
+                case let other:
+                    throw ToolError("Unknown window action '\(other)'.")
+                }
+            })
     }
 
     // MARK: - Permission gate
@@ -298,15 +392,20 @@ final class ToolRouter {
             ToolSpec(
                 name: "mac_click",
                 description:
-                    "Click an element in a granted app. Prefer 'ref' (from mac_read_ui / "
-                    + "mac_find_element): it presses semantically via Accessibility, falling back "
-                    + "to a synthetic click at the element's center. Or pass global screen point "
-                    + "x,y (points, top-left). Full-tier.",
+                    "Click an element in a granted app. Easiest: pass 'query' to find-and-click a "
+                    + "control by its label in one call. Or 'ref' (from mac_read_ui/mac_find_element), "
+                    + "or global screen point 'x','y' (points, top-left). Single left-clicks invoke "
+                    + "the control via Accessibility (no app activation / focus steal). Full-tier.",
                 inputSchema: schema([
                     "bundleId": prop("string", "Target app bundle id."),
                     "pid": prop("integer", "Target app process id."),
-                    "ref": prop("string", "Element ref from mac_read_ui/mac_find_element (preferred)."),
-                    "x": prop("number", "Global screen X (points, top-left) — used if no ref."),
+                    "query": prop(
+                        "string",
+                        "Find-and-click the first element whose label/role/value contains this "
+                            + "(one-shot — no prior read needed)."),
+                    "role": prop("string", "Restrict 'query' to an AX role (e.g. AXButton)."),
+                    "ref": prop("string", "Element ref from mac_read_ui/mac_find_element."),
+                    "x": prop("number", "Global screen X (points, top-left)."),
                     "y": prop("number", "Global screen Y (points, top-left)."),
                     "button": prop("string", "left|right|center. Default left."),
                     "clicks": prop("integer", "1=single, 2=double. Default 1."),
@@ -315,43 +414,7 @@ final class ToolRouter {
                 let a = Args(raw)
                 let app = try requireFull(a)
                 try ensureAXTrust()
-                let button = mouseButton(a.string("button"))
-                let clicks = clampInt(a.int("clicks"), default: 1, min: 1, max: 3)
-                if let ref = a.string("ref") {
-                    // Tier A: semantic AX press (single left-click only).
-                    if case .left = button, clicks == 1,
-                        (try? AXController.press(ref: ref, pid: app.pid)) == true
-                    {
-                        return .text("Pressed \(ref) on \(app.name).")
-                    }
-                    // Tier B: try AXPress on the element at the center (no app activation),
-                    // else a synthetic click.
-                    guard let frame = AXController.frame(ref: ref, pid: app.pid) else {
-                        throw ToolError(
-                            "Ref \(ref) has no press action and no resolvable frame — re-run "
-                                + "mac_read_ui for fresh refs.")
-                    }
-                    let c = CGPoint(x: frame.midX, y: frame.midY)
-                    if case .left = button, clicks == 1, AXController.pressElementAt(c) {
-                        return .text("Pressed \(ref) on \(app.name) (no focus change).")
-                    }
-                    try InputControl.click(
-                        pid: app.pid, at: c, button: button, clicks: clicks, flags: [])
-                    return .text("Clicked \(ref) at (\(Int(c.x)),\(Int(c.y))) on \(app.name).")
-                }
-                if let x = a.double("x"), let y = a.double("y") {
-                    let p = CGPoint(x: x, y: y)
-                    // Prefer a semantic press at the point (no app activation) for a single
-                    // left-click; fall back to a synthetic click for non-actionable spots.
-                    if case .left = button, clicks == 1, AXController.pressElementAt(p) {
-                        return .text(
-                            "Pressed element at (\(Int(x)),\(Int(y))) on \(app.name) (no focus change).")
-                    }
-                    try InputControl.click(
-                        pid: app.pid, at: p, button: button, clicks: clicks, flags: [])
-                    return .text("Clicked (\(Int(x)),\(Int(y))) on \(app.name).")
-                }
-                throw ToolError("Provide 'ref' (preferred) or both 'x' and 'y' (global points).")
+                return .text(try doClick(app: app, a: a) + " on \(app.name).")
             })
 
         registry.register(
@@ -643,6 +706,193 @@ final class ToolRouter {
             throw ToolError("text too long (max \(Self.maxTextLength) characters).")
         }
         return s
+    }
+
+    // MARK: - Flow tier (Full): wait + batch
+
+    private func registerFlowTier() {
+        registry.register(
+            ToolSpec(
+                name: "mac_wait_for",
+                description:
+                    "Wait until an element matching 'query' (and optional 'role') appears in a "
+                    + "granted app, then return it. Set absent=true to wait until it DISAPPEARS. "
+                    + "Polls up to 'timeout' seconds (default 10, max 60). Full-tier.",
+                inputSchema: schema([
+                    "bundleId": prop("string", "Target app bundle id."),
+                    "pid": prop("integer", "Target app process id."),
+                    "query": prop("string", "Substring to wait for (required)."),
+                    "role": prop("string", "Restrict to an AX role (e.g. AXButton)."),
+                    "timeout": prop("number", "Max seconds to wait. Default 10, max 60."),
+                    "absent": prop("boolean", "Wait until it disappears instead. Default false."),
+                ])
+            ) { [self] raw in
+                let a = Args(raw)
+                let app = try requireFull(a)
+                try ensureAXTrust()
+                let query = try a.requiredString("query")
+                let absent = a.bool("absent") ?? false
+                let timeout = min(60.0, max(0.5, a.double("timeout") ?? 10.0))
+                if waitFor(
+                    pid: app.pid, query: query, role: a.string("role"), absent: absent,
+                    timeout: timeout)
+                {
+                    return .text("\(absent ? "Gone" : "Found"): \"\(query)\" in \(app.name).")
+                }
+                return .failure(
+                    "Timed out after \(Int(timeout))s waiting for \"\(query)\" to "
+                        + "\(absent ? "disappear" : "appear") in \(app.name).")
+            })
+
+        registry.register(
+            ToolSpec(
+                name: "mac_do",
+                description:
+                    "Run a sequence of UI steps on a granted app in ONE call (fewer round-trips). "
+                    + "'steps' is an array; each item has a 'do': click {query|ref|x,y}, type "
+                    + "{text, ref?, submit?}, key {combo}, scroll {direction, amount?}, wait "
+                    + "{query, timeout?, absent?}, delay {ms}. Stops at the first failing step. "
+                    + "Full-tier.",
+                inputSchema: schema([
+                    "bundleId": prop("string", "Target app bundle id."),
+                    "pid": prop("integer", "Target app process id."),
+                    "steps": [
+                        "type": "array", "items": ["type": "object"],
+                        "description": .string(
+                            "Ordered step objects, e.g. [{\"do\":\"click\",\"query\":\"File\"},"
+                                + "{\"do\":\"wait\",\"query\":\"Save\"},{\"do\":\"click\",\"query\":"
+                                + "\"Save\"}]."),
+                    ],
+                ])
+            ) { [self] raw in
+                let a = Args(raw)
+                let app = try requireFull(a)
+                try ensureAXTrust()
+                let steps = a.array("steps") ?? []
+                var results: [String] = []
+                for (i, stepV) in steps.enumerated() {
+                    let s = Args(stepV)
+                    let kind = s.string("do") ?? "?"
+                    do {
+                        results.append("[\(i)] \(kind): \(try performStep(app: app, s: s))")
+                    } catch {
+                        results.append("[\(i)] \(kind): FAILED — \(String(describing: error))")
+                        return .text(
+                            "Ran \(i)/\(steps.count) steps on \(app.name):\n"
+                                + results.joined(separator: "\n"))
+                    }
+                }
+                return .text(
+                    "Ran all \(steps.count) steps on \(app.name):\n"
+                        + results.joined(separator: "\n"))
+            })
+    }
+
+    /// Shared click logic (mac_click + mac_do 'click' step): resolve the target from query / ref /
+    /// coordinate; single left-clicks invoke via Accessibility (no activation), else synthetic.
+    private func doClick(app: AppRecord, a: Args) throws -> String {
+        let button = mouseButton(a.string("button"))
+        let clicks = clampInt(a.int("clicks"), default: 1, min: 1, max: 3)
+        var ref = a.string("ref")
+        if (ref?.isEmpty ?? true), let query = a.string("query"), !query.isEmpty {
+            ref = try AXController.firstMatchRef(pid: app.pid, query: query, role: a.string("role"))
+            if ref == nil { throw ToolError("No element matching \"\(query)\" in \(app.name).") }
+        }
+        if let ref, !ref.isEmpty {
+            if case .left = button, clicks == 1,
+                (try? AXController.press(ref: ref, pid: app.pid)) == true
+            {
+                return "pressed \(ref)"
+            }
+            guard let frame = AXController.frame(ref: ref, pid: app.pid) else {
+                throw ToolError("Ref \(ref) has no press action and no frame — re-read the UI.")
+            }
+            let c = CGPoint(x: frame.midX, y: frame.midY)
+            if case .left = button, clicks == 1, AXController.pressElementAt(c) {
+                return "pressed \(ref) (no focus change)"
+            }
+            try InputControl.click(pid: app.pid, at: c, button: button, clicks: clicks, flags: [])
+            return "clicked \(ref)"
+        }
+        if let x = a.double("x"), let y = a.double("y") {
+            let p = CGPoint(x: x, y: y)
+            if case .left = button, clicks == 1, AXController.pressElementAt(p) {
+                return "pressed (\(Int(x)),\(Int(y))) (no focus change)"
+            }
+            try InputControl.click(pid: app.pid, at: p, button: button, clicks: clicks, flags: [])
+            return "clicked (\(Int(x)),\(Int(y)))"
+        }
+        throw ToolError("Provide 'query', 'ref', or both 'x' and 'y'.")
+    }
+
+    /// Poll until `query` (optionally filtered by `role`) is present (or absent) in `pid`, or
+    /// the timeout elapses.
+    private func waitFor(pid: Int, query: String, role: String?, absent: Bool, timeout: Double)
+        -> Bool
+    {
+        let deadline = Date().addingTimeInterval(timeout)
+        repeat {
+            let present =
+                ((try? AXController.firstMatchRef(pid: pid, query: query, role: role)) ?? nil)
+                != nil
+            if present != absent { return true }
+            usleep(300_000)
+        } while Date() < deadline
+        return false
+    }
+
+    /// Execute one mac_do step against `app`.
+    private func performStep(app: AppRecord, s: Args) throws -> String {
+        switch (s.string("do") ?? "").lowercased() {
+        case "click":
+            return try doClick(app: app, a: s)
+        case "type":
+            let text = try checkedText(s.requiredString("text"))
+            if let ref = s.string("ref"),
+                (try? AXController.setValue(ref: ref, pid: app.pid, text)) == true
+            {
+                // value set directly via Accessibility
+            } else {
+                if let ref = s.string("ref") { try? AXController.focus(ref: ref, pid: app.pid) }
+                try InputControl.typeText(pid: app.pid, text)
+            }
+            if s.bool("submit") == true { try InputControl.pressKey(pid: app.pid, combo: "return") }
+            return "typed \(text.count) chars"
+        case "key":
+            let combo = try s.requiredString("combo")
+            try InputControl.pressKey(pid: app.pid, combo: combo)
+            return "pressed \(combo)"
+        case "scroll":
+            let amount = Int32(clampInt(s.int("amount"), default: 5, min: 0, max: 10000))
+            var dx: Int32 = 0
+            var dy: Int32 = 0
+            switch (s.string("direction") ?? "down").lowercased() {
+            case "up": dy = amount
+            case "left": dx = amount
+            case "right": dx = -amount
+            default: dy = -amount
+            }
+            let map = try windowMapping(pid: app.pid, windowId: nil, maxWidth: nil)
+            try InputControl.scroll(
+                pid: app.pid, at: CGPoint(x: map.bounds.midX, y: map.bounds.midY), dx: dx, dy: dy)
+            return "scrolled"
+        case "wait":
+            let query = try s.requiredString("query")
+            let absent = s.bool("absent") ?? false
+            let timeout = min(60.0, max(0.5, s.double("timeout") ?? 10.0))
+            if waitFor(
+                pid: app.pid, query: query, role: s.string("role"), absent: absent, timeout: timeout)
+            {
+                return "\(absent ? "gone" : "found") \"\(query)\""
+            }
+            throw ToolError("wait timed out for \"\(query)\"")
+        case "delay":
+            let ms = clampInt(s.int("ms"), default: 200, min: 0, max: 10000)
+            usleep(useconds_t(ms) * 1000)
+            return "delayed \(ms)ms"
+        case let other:
+            throw ToolError("unknown step '\(other)' — use click/type/key/scroll/wait/delay")
+        }
     }
 
     private func mouseButton(_ s: String?) -> MouseButton {

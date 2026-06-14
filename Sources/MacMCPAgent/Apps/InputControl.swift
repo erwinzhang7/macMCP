@@ -48,6 +48,79 @@ enum InputControl {
         }
     }
 
+    /// Press-drag-release from `from` to `to` (global screen points, top-left origin), delivered
+    /// to `pid` via event.postToPid (background-safe cursor-wise). Posts a button-down at `from`,
+    /// `steps` interpolated drag events from→to, then a button-up at `to`. A small usleep between
+    /// steps lets the target app track the drag. NOTE: a real mouse-down raises the clicked window
+    /// — that's inherent to dragging.
+    static func drag(
+        pid: Int,
+        from: CGPoint,
+        to: CGPoint,
+        steps: Int = 20,
+        button: MouseButton = .left,
+        flags: CGEventFlags = []
+    ) throws {
+        try queue.sync {
+            let source = eventSource()
+            let eventTypes: (down: CGEventType, dragged: CGEventType, up: CGEventType, button: CGMouseButton)
+            switch button {
+            case .left:
+                eventTypes = (.leftMouseDown, .leftMouseDragged, .leftMouseUp, .left)
+            case .right:
+                eventTypes = (.rightMouseDown, .rightMouseDragged, .rightMouseUp, .right)
+            case .center:
+                eventTypes = (.otherMouseDown, .otherMouseDragged, .otherMouseUp, .center)
+            }
+
+            guard
+                let down = CGEvent(
+                    mouseEventSource: source,
+                    mouseType: eventTypes.down,
+                    mouseCursorPosition: from,
+                    mouseButton: eventTypes.button)
+            else {
+                throw ToolError("Could not create mouse event.")
+            }
+            down.flags = flags
+            down.postToPid(pid_t(pid))
+            usleep(10_000)
+
+            let count = max(1, steps)
+            for i in 1...count {
+                let progress = CGFloat(i) / CGFloat(count)
+                let point = CGPoint(
+                    x: from.x + ((to.x - from.x) * progress),
+                    y: from.y + ((to.y - from.y) * progress))
+                guard
+                    let dragged = CGEvent(
+                        mouseEventSource: source,
+                        mouseType: eventTypes.dragged,
+                        mouseCursorPosition: point,
+                        mouseButton: eventTypes.button)
+                else {
+                    throw ToolError("Could not create mouse event.")
+                }
+                dragged.flags = flags
+                dragged.postToPid(pid_t(pid))
+                usleep(10_000)
+            }
+
+            guard
+                let up = CGEvent(
+                    mouseEventSource: source,
+                    mouseType: eventTypes.up,
+                    mouseCursorPosition: to,
+                    mouseButton: eventTypes.button)
+            else {
+                throw ToolError("Could not create mouse event.")
+            }
+            up.flags = flags
+            up.postToPid(pid_t(pid))
+            usleep(10_000)
+        }
+    }
+
     /// Type Unicode text into the target process.
     static func typeText(pid: Int, _ text: String) throws {
         try queue.sync {

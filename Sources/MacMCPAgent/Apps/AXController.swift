@@ -75,6 +75,14 @@ enum AXController {
         return result.json
     }
 
+    /// Find the first element matching `query` (and optional role) and return its cached ref,
+    /// or nil if none. Used by one-shot actions (click-by-query, wait_for). The matched element
+    /// is cached so the ref is immediately usable by press/frame/setValue.
+    static func firstMatchRef(pid: Int, query: String, role: String?) throws -> String? {
+        let result = try find(pid: pid, query: query, role: role, max: 1)
+        return result["elements"]?.arrayValue?.first?["ref"]?.stringValue
+    }
+
     /// Return a cached Accessibility element for a previous snapshot/find ref.
     static func element(forRef ref: String, pid: Int) -> AXUIElement? {
         cacheLock.lock()
