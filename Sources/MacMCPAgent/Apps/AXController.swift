@@ -38,27 +38,41 @@ enum AXController {
     /// Snapshot actionable or labeled Accessibility elements for an app pid.
     static func snapshot(pid: Int, maxElements: Int) throws -> JSONValue {
         try ensureTrusted()
+        let prepareStart = DispatchTime.now().uptimeNanoseconds
         let appElement = prepareApplicationElement(pid: pid)
         resetCache(pid: pid)
-        return collect(
+        let prepareEnd = DispatchTime.now().uptimeNanoseconds
+        let result = collect(
             appElement: appElement,
             pid: pid,
             query: nil,
             roleFilter: nil,
             maxElements: max(0, maxElements))
+        let walkEnd = DispatchTime.now().uptimeNanoseconds
+        let prepMs = (prepareEnd - prepareStart) / 1_000_000
+        let walkMs = (walkEnd - prepareEnd) / 1_000_000
+        log("ax snapshot pid=\(pid) prepare=\(prepMs)ms walk=\(walkMs)ms visited=\(result.visited) included=\(result.included)")
+        return result.json
     }
 
     /// Find actionable or labeled Accessibility elements matching `query` and optional role.
     static func find(pid: Int, query: String, role: String?, max: Int) throws -> JSONValue {
         try ensureTrusted()
+        let prepareStart = DispatchTime.now().uptimeNanoseconds
         let appElement = prepareApplicationElement(pid: pid)
         resetCache(pid: pid)
-        return collect(
+        let prepareEnd = DispatchTime.now().uptimeNanoseconds
+        let result = collect(
             appElement: appElement,
             pid: pid,
             query: query,
             roleFilter: role,
             maxElements: Swift.max(0, max))
+        let walkEnd = DispatchTime.now().uptimeNanoseconds
+        let prepMs = (prepareEnd - prepareStart) / 1_000_000
+        let walkMs = (walkEnd - prepareEnd) / 1_000_000
+        log("ax find pid=\(pid) prepare=\(prepMs)ms walk=\(walkMs)ms visited=\(result.visited) included=\(result.included)")
+        return result.json
     }
 
     /// Return a cached Accessibility element for a previous snapshot/find ref.
@@ -132,7 +146,7 @@ enum AXController {
         query: String?,
         roleFilter: String?,
         maxElements: Int
-    ) -> JSONValue {
+    ) -> (json: JSONValue, visited: Int, included: Int) {
         var queue: [AXUIElement] = [appElement]
         var nextIndex = 0
         var visited = Set<UInt>()
@@ -164,24 +178,46 @@ enum AXController {
             elements.append(json(for: info, ref: ref))
         }
 
-        return [
+        let json: JSONValue = [
             "app": .int(pid),
             "count": .int(elements.count),
             "elements": .array(elements),
         ]
+        return (json, visited.count, elements.count)
     }
 
     private static func elementInfo(_ element: AXUIElement) -> ElementInfo {
-        let role = stringAttribute(element, kAXRoleAttribute) ?? ""
-        let subrole = stringAttribute(element, kAXSubroleAttribute)
-        let title = stringAttribute(element, kAXTitleAttribute)
+        let attributes = [
+            kAXRoleAttribute,
+            kAXSubroleAttribute,
+            kAXTitleAttribute,
+            kAXValueAttribute,
+            kAXDescriptionAttribute,
+            kAXEnabledAttribute,
+            kAXFocusedAttribute,
+            kAXPositionAttribute,
+            kAXSizeAttribute,
+        ] as CFArray
+        var values: CFArray?
+        let error = AXUIElementCopyMultipleAttributeValues(
+            element,
+            attributes,
+            AXCopyMultipleAttributeOptions(rawValue: 0),
+            &values)
+        if error != .success {
+            values = nil
+        }
+
+        let role = stringValue(multipleAttributeValue(values, at: 0)) ?? ""
+        let subrole = stringValue(multipleAttributeValue(values, at: 1))
+        let title = stringValue(multipleAttributeValue(values, at: 2))
         let value = isSecureTextField(role: role, subrole: subrole)
-            ? nil : stringLikeAttribute(element, kAXValueAttribute)
-        let description = stringAttribute(element, kAXDescriptionAttribute)
-        let enabled = boolAttribute(element, kAXEnabledAttribute)
-        let focused = boolAttribute(element, kAXFocusedAttribute)
-        let position = pointAttribute(element, kAXPositionAttribute)
-        let size = sizeAttribute(element, kAXSizeAttribute)
+            ? nil : stringLikeValue(multipleAttributeValue(values, at: 3))
+        let description = stringValue(multipleAttributeValue(values, at: 4))
+        let enabled = boolValue(multipleAttributeValue(values, at: 5))
+        let focused = boolValue(multipleAttributeValue(values, at: 6))
+        let position = pointValue(multipleAttributeValue(values, at: 7))
+        let size = sizeValue(multipleAttributeValue(values, at: 8))
         let actions = actionNames(element)
 
         return ElementInfo(
@@ -257,8 +293,12 @@ enum AXController {
     private static func prepareApplicationElement(pid: Int) -> AXUIElement {
         let appElement = AXUIElementCreateApplication(pid_t(pid))
         AXUIElementSetMessagingTimeout(appElement, 2.0)
+        // Always (re)enable: Electron/Chromium tears down its renderer accessibility tree when
+        // the app loses focus, so caching "already enabled" would leave us with only the menu
+        // bar. Re-setting AXManualAccessibility each time prompts it to rebuild. It's one cheap
+        // IPC, and the poll below exits immediately when content is already present (native apps).
         enableManualAccessibility(appElement)
-        waitForChildren(appElement)
+        waitForWindowContent(appElement)
         return appElement
     }
 
@@ -275,11 +315,26 @@ enum AXController {
         }
     }
 
-    private static func waitForChildren(_ appElement: AXUIElement) {
-        for _ in 0..<5 {
-            if (children(of: appElement)?.count ?? 0) > 0 { return }
-            usleep(300_000)
+    /// Poll until the app's windows expose child content — Electron rebuilds its window subtree
+    /// lazily after AXManualAccessibility is (re)enabled. Native apps return immediately; a
+    /// backgrounded Electron app never populates (Chromium only builds the tree for a focused
+    /// window), so this is bounded to ~1.2s and then returns what's available (the menu bar).
+    private static func waitForWindowContent(_ appElement: AXUIElement) {
+        for _ in 0..<6 {
+            if windowsHaveContent(appElement) { return }
+            usleep(200_000)
         }
+    }
+
+    private static func windowsHaveContent(_ appElement: AXUIElement) -> Bool {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value)
+                == .success,
+            let windows = value as? [AXUIElement]
+        else { return false }
+        if windows.isEmpty { return true }  // menu-bar-only app: nothing to wait for
+        return windows.contains { (children(of: $0)?.count ?? 0) > 0 }
     }
 
     // MARK: - AX reads
@@ -302,9 +357,7 @@ enum AXController {
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
         guard error == .success, let value else { return nil }
-        if let string = value as? String { return string }
-        if let number = value as? NSNumber { return number.stringValue }
-        return nil
+        return stringLikeValue(value)
     }
 
     private static func boolAttribute(_ element: AXUIElement, _ attribute: String) -> Bool? {
@@ -317,25 +370,15 @@ enum AXController {
     private static func pointAttribute(_ element: AXUIElement, _ attribute: String) -> CGPoint? {
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-        guard error == .success, let value, CFGetTypeID(value) == AXValueGetTypeID() else {
-            return nil
-        }
-        let axValue = value as! AXValue
-        guard AXValueGetType(axValue) == .cgPoint else { return nil }
-        var point = CGPoint.zero
-        return AXValueGetValue(axValue, .cgPoint, &point) ? point : nil
+        guard error == .success, let value else { return nil }
+        return pointValue(value)
     }
 
     private static func sizeAttribute(_ element: AXUIElement, _ attribute: String) -> CGSize? {
         var value: CFTypeRef?
         let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
-        guard error == .success, let value, CFGetTypeID(value) == AXValueGetTypeID() else {
-            return nil
-        }
-        let axValue = value as! AXValue
-        guard AXValueGetType(axValue) == .cgSize else { return nil }
-        var size = CGSize.zero
-        return AXValueGetValue(axValue, .cgSize, &size) ? size : nil
+        guard error == .success, let value else { return nil }
+        return sizeValue(value)
     }
 
     private static func actionNames(_ element: AXUIElement) -> [String] {
@@ -343,6 +386,49 @@ enum AXController {
         let error = AXUIElementCopyActionNames(element, &names)
         guard error == .success else { return [] }
         return (names as? [String]) ?? []
+    }
+
+    private static func multipleAttributeValue(_ values: CFArray?, at index: CFIndex) -> CFTypeRef? {
+        guard let values, index < CFArrayGetCount(values) else { return nil }
+        let raw = CFArrayGetValueAtIndex(values, index)
+        let value = Unmanaged<CFTypeRef>.fromOpaque(raw!).takeUnretainedValue()
+        return isAXErrorValue(value) ? nil : value
+    }
+
+    private static func isAXErrorValue(_ value: CFTypeRef) -> Bool {
+        guard CFGetTypeID(value) == AXValueGetTypeID() else { return false }
+        return AXValueGetType(value as! AXValue) == .axError
+    }
+
+    private static func stringValue(_ value: CFTypeRef?) -> String? {
+        value as? String
+    }
+
+    private static func stringLikeValue(_ value: CFTypeRef?) -> String? {
+        guard let value else { return nil }
+        if let string = value as? String { return string }
+        if let number = value as? NSNumber { return number.stringValue }
+        return nil
+    }
+
+    private static func boolValue(_ value: CFTypeRef?) -> Bool? {
+        value as? Bool
+    }
+
+    private static func pointValue(_ value: CFTypeRef?) -> CGPoint? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = value as! AXValue
+        guard AXValueGetType(axValue) == .cgPoint else { return nil }
+        var point = CGPoint.zero
+        return AXValueGetValue(axValue, .cgPoint, &point) ? point : nil
+    }
+
+    private static func sizeValue(_ value: CFTypeRef?) -> CGSize? {
+        guard let value, CFGetTypeID(value) == AXValueGetTypeID() else { return nil }
+        let axValue = value as! AXValue
+        guard AXValueGetType(axValue) == .cgSize else { return nil }
+        var size = CGSize.zero
+        return AXValueGetValue(axValue, .cgSize, &size) ? size : nil
     }
 
     // MARK: - Cache

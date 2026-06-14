@@ -78,15 +78,20 @@ final class AgentCore {
             }
             let args = req["arguments"] ?? .object([:])
             return workQueue.sync {
+                let t0 = DispatchTime.now()
+                let response: JSONValue
                 do {
-                    return Wire.resultResponse(id: id, result: try tool.handler(args).toJSON())
+                    response = Wire.resultResponse(id: id, result: try tool.handler(args).toJSON())
                 } catch {
-                    return Wire.resultResponse(
+                    response = Wire.resultResponse(
                         id: id,
                         result: ToolResult.failure(
                             "\(name) failed: \(String(describing: error))"
                         ).toJSON())
                 }
+                let ms = Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1_000_000
+                log(String(format: "tool=%@ %.0fms", name, ms))
+                return response
             }
         case let other:
             return Wire.errorResponse(id: id, message: "unknown method: \(other)")

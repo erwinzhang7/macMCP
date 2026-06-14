@@ -20,7 +20,7 @@ DEFAULT_TIER_TOOLS = {
     "mac_list_apps", "mac_app_info", "mac_list_windows", "mac_permissions", "mac_network_status",
 }
 FULL_TIER_TOOLS = {"mac_screenshot", "mac_read_ui", "mac_find_element"}
-INPUT_TIER_TOOLS = {"mac_click", "mac_type", "mac_scroll", "mac_key", "mac_computer"}
+INPUT_TIER_TOOLS = {"mac_click", "mac_type", "mac_scroll", "mac_key", "mac_computer", "mac_menu"}
 NETWORK_TIER_TOOLS = {"mac_read_network"}
 ALL_TOOLS = DEFAULT_TIER_TOOLS | FULL_TIER_TOOLS | INPUT_TIER_TOOLS | NETWORK_TIER_TOOLS
 

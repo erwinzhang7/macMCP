@@ -218,6 +218,10 @@ final class ToolRouter {
                     "windowId": prop(
                         "integer", "Specific window id (from mac_list_windows). Default: the "
                             + "app's largest on-screen window."),
+                    "maxWidth": prop(
+                        "integer", "Downscale so the image is at most this many pixels wide "
+                            + "(default 1400). Smaller = faster + cheaper to process."),
+                    "format": prop("string", "png (default, crisp text) or jpeg (smaller/faster)."),
                     "bringToFront": prop(
                         "boolean", "Activate the app before capturing. Default false."),
                 ])
@@ -225,23 +229,20 @@ final class ToolRouter {
                 let a = Args(raw)
                 let app = try requireFull(a)
                 if a.bool("bringToFront") == true { activate(pid: app.pid) }
-                let png: Data
-                if let windowId = a.int("windowId") {
-                    // Security: only let a granted app screenshot its OWN windows — never an
-                    // arbitrary windowId that happens to belong to a different (ungranted) app.
-                    guard inventory.windows(forPID: app.pid).contains(where: { $0.windowId == windowId })
-                    else {
-                        throw ToolError(
-                            "Window \(windowId) is not owned by \(app.name) (pid \(app.pid)). "
-                                + "You may only screenshot the granted app's own windows.")
-                    }
-                    png = try ScreenCapture.capturePNG(windowID: windowId)
-                } else {
-                    png = try ScreenCapture.capturePNG(pid: app.pid)
-                }
+                // windowMapping is pid-scoped, so a foreign windowId can't be captured (ownership)
+                // and it computes the downscaled capture dimensions.
+                let jpeg = isJPEG(a.string("format"))
+                let map = try windowMapping(
+                    pid: app.pid, windowId: a.int("windowId"),
+                    maxWidth: a.int("maxWidth") ?? defaultMaxWidth)
+                let data = try ScreenCapture.capturePNG(
+                    windowID: map.windowId, pixelWidth: map.pixelWidth,
+                    pixelHeight: map.pixelHeight, jpeg: jpeg)
                 return .image(
-                    base64: png.base64EncodedString(),
-                    caption: "Screenshot of \(app.name) (\(png.count) bytes PNG).")
+                    base64: data.base64EncodedString(),
+                    mimeType: jpeg ? "image/jpeg" : "image/png",
+                    caption: "Screenshot of \(app.name) — window \(map.windowId), "
+                        + "\(map.pixelWidth)×\(map.pixelHeight)px, \(data.count) bytes.")
             })
 
         registry.register(
@@ -442,7 +443,7 @@ final class ToolRouter {
                 if let ref = a.string("ref"), let f = AXController.frame(ref: ref, pid: app.pid) {
                     point = CGPoint(x: f.midX, y: f.midY)
                 } else {
-                    let map = try windowMapping(pid: app.pid, windowId: nil)
+                    let map = try windowMapping(pid: app.pid, windowId: nil, maxWidth: nil)
                     point = CGPoint(x: map.bounds.midX, y: map.bounds.midY)
                 }
                 try InputControl.scroll(pid: app.pid, at: point, dx: dx, dy: dy)
@@ -461,6 +462,7 @@ final class ToolRouter {
                     "bundleId": prop("string", "Target app bundle id."),
                     "pid": prop("integer", "Target app process id."),
                     "windowId": prop("integer", "Specific window (default: largest on-screen)."),
+                    "format": prop("string", "Screenshot format: png (default) or jpeg (smaller)."),
                     "action": prop(
                         "string",
                         "screenshot|left_click|right_click|double_click|type|key|scroll (required)."),
@@ -475,7 +477,10 @@ final class ToolRouter {
                 let a = Args(raw)
                 let app = try requireFull(a)
                 let action = try a.requiredString("action").lowercased()
-                let map = try windowMapping(pid: app.pid, windowId: a.int("windowId"))
+                // Fixed maxWidth (not caller-tunable) so a screenshot and its follow-up clicks
+                // always share the same pixel→point scale.
+                let map = try windowMapping(
+                    pid: app.pid, windowId: a.int("windowId"), maxWidth: defaultMaxWidth)
                 func globalPoint() throws -> CGPoint {
                     guard let px = a.int("x"), let py = a.int("y") else {
                         throw ToolError("action '\(action)' needs x,y pixel coordinates.")
@@ -486,13 +491,19 @@ final class ToolRouter {
                 }
                 switch action {
                 case "screenshot":
-                    let png = try ScreenCapture.capturePNG(windowID: map.windowId)
+                    let jpeg = isJPEG(a.string("format"))
+                    let png = try ScreenCapture.capturePNG(
+                        windowID: map.windowId, pixelWidth: map.pixelWidth,
+                        pixelHeight: map.pixelHeight, jpeg: jpeg)
                     let caption =
-                        "Window \(map.windowId) of \(app.name): "
-                        + "\(Int(map.bounds.width))×\(Int(map.bounds.height)) pt at "
-                        + "(\(Int(map.origin.x)),\(Int(map.origin.y))), scale \(map.scale). "
+                        "Window \(map.windowId) of \(app.name): image is "
+                        + "\(map.pixelWidth)×\(map.pixelHeight)px (window "
+                        + "\(Int(map.bounds.width))×\(Int(map.bounds.height))pt at "
+                        + "(\(Int(map.origin.x)),\(Int(map.origin.y)))). "
                         + "Click coordinates are PIXELS within this image."
-                    return .image(base64: png.base64EncodedString(), caption: caption)
+                    return .image(
+                        base64: png.base64EncodedString(),
+                        mimeType: jpeg ? "image/jpeg" : "image/png", caption: caption)
                 case "left_click", "right_click", "double_click":
                     try ensureAXTrust()
                     let p = try globalPoint()
@@ -527,6 +538,42 @@ final class ToolRouter {
                     return .text("Scrolled on \(app.name).")
                 default:
                     throw ToolError("Unknown action '\(action)'.")
+                }
+            })
+
+        registry.register(
+            ToolSpec(
+                name: "mac_menu",
+                description:
+                    "Invoke a granted app's menu-bar item by title path, e.g. path "
+                    + "[\"Playback\",\"Next\"]. WORKS IN THE BACKGROUND — an app's menu bar stays "
+                    + "accessible while it isn't focused, so this is the reliable way to control a "
+                    + "backgrounded Electron app (Spotify, Lark) whose in-window UI is hidden. Omit "
+                    + "'path' to list top-level menus; pass one title to list that menu's items; "
+                    + "pass the full path to invoke it. Full-tier.",
+                inputSchema: schema([
+                    "bundleId": prop("string", "Target app bundle id."),
+                    "pid": prop("integer", "Target app process id."),
+                    "path": [
+                        "type": "array",
+                        "items": ["type": "string"],
+                        "description": .string(
+                            "Menu title path, e.g. [\"Playback\",\"Next\"]. Omit to list top "
+                                + "menus; one title lists that menu's items; full path invokes it."),
+                    ],
+                ])
+            ) { [self] raw in
+                let a = Args(raw)
+                let app = try requireFull(a)
+                try ensureAXTrust()
+                let path = (a.array("path") ?? []).compactMap { $0.stringValue }
+                switch path.count {
+                case 0:
+                    return .text(jsonText(try MenuControl.list(pid: app.pid, under: nil)))
+                case 1:
+                    return .text(jsonText(try MenuControl.list(pid: app.pid, under: path[0])))
+                default:
+                    return .text(try MenuControl.select(pid: app.pid, path: path))
                 }
             })
     }
@@ -599,17 +646,34 @@ final class ToolRouter {
         }
     }
 
-    /// Resolve the target window's screen origin (points, top-left), backing scale, and bounds,
-    /// for mapping mac_computer screenshot pixels → global screen points.
-    /// NB: scale uses the main display; multi-display mixed-scale setups are a known v1 limitation.
-    private func windowMapping(pid: Int, windowId: Int?)
-        throws -> (origin: CGPoint, scale: CGFloat, windowId: Int, bounds: CGRect)
+    private let defaultMaxWidth = 1400
+
+    private func isJPEG(_ format: String?) -> Bool {
+        let f = (format ?? "png").lowercased()
+        return f == "jpeg" || f == "jpg"
+    }
+
+    /// Resolve the target window plus the capture geometry. `scale` is the effective
+    /// pixels-per-point of the returned image (= min(backingScale, maxWidth/pointWidth) when a
+    /// `maxWidth` is given), and `pixelWidth/Height` are the exact capture dimensions. The SAME
+    /// `scale` is used to map mac_computer screenshot pixels → global points, so downscaling
+    /// stays click-accurate. Selecting by `windowId` is pid-scoped (only the app's own windows),
+    /// which also enforces the screenshot-ownership rule.
+    /// NB: backing scale uses the main display; multi-display mixed-scale is a known v1 limit.
+    private func windowMapping(pid: Int, windowId: Int?, maxWidth: Int?)
+        throws -> (
+            origin: CGPoint, scale: CGFloat, windowId: Int, bounds: CGRect, pixelWidth: Int,
+            pixelHeight: Int
+        )
     {
         let wins = inventory.windows(forPID: pid)
         let win: WindowRecord
         if let windowId {
             guard let w = wins.first(where: { $0.windowId == windowId }) else {
-                throw ToolError("Window \(windowId) not found for pid \(pid).")
+                throw ToolError(
+                    "Window \(windowId) isn't an on-screen window of pid \(pid). It may belong to "
+                        + "another app, or be minimized / on another Space — bring the app forward "
+                        + "or switch to its Space, then retry.")
             }
             win = w
         } else {
@@ -618,12 +682,19 @@ final class ToolRouter {
                     $0.isOnscreen && $0.layer == 0 && $0.bounds.width > 1 && $0.bounds.height > 1
                 }).max(by: { $0.bounds.width * $0.bounds.height < $1.bounds.width * $1.bounds.height })
             else {
-                throw ToolError("No on-screen window for pid \(pid).")
+                throw ToolError(
+                    "No on-screen window for pid \(pid) — the app may be minimized or on another "
+                        + "Space (bring it forward / switch Spaces). Note Electron apps also drop "
+                        + "their window content when not focused.")
             }
             win = w
         }
-        let scale = NSScreen.main?.backingScaleFactor ?? 2.0
-        return (win.bounds.origin, scale, win.windowId, win.bounds)
+        let backing = NSScreen.main?.backingScaleFactor ?? 2.0
+        let pointW = max(1, win.bounds.width)
+        let scale: CGFloat = maxWidth.map { min(backing, CGFloat($0) / pointW) } ?? backing
+        let pw = max(1, Int((win.bounds.width * scale).rounded()))
+        let ph = max(1, Int((win.bounds.height * scale).rounded()))
+        return (win.bounds.origin, scale, win.windowId, win.bounds, pw, ph)
     }
 
     // MARK: - Schema helpers (mirror safari-mcp's inline JSON Schemas)
