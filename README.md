@@ -1,5 +1,7 @@
 # macMCP
 
+[![CI](https://github.com/erwinzhang7/macMCP/actions/workflows/ci.yml/badge.svg)](https://github.com/erwinzhang7/macMCP/actions/workflows/ci.yml)
+
 Control **any macOS app** from Claude over MCP — enumerate apps, screenshot a window, read
 its UI (accessibility tree), click/type/scroll, and watch its network. Sister project to
 [safari-mcp](../safari-mcp): same idea, but for native apps (e.g. Lark, Slack) instead of
@@ -29,7 +31,7 @@ never pulls AppKit.
 
 ## Status
 
-All shipped (14 tools), each verified live:
+All shipped (19 tools), each verified live:
 
 - **Phase 1 ✅** — shim + agent + unix-socket IPC + default-tier tools (`mac_list_apps`,
   `mac_app_info`, `mac_list_windows`, `mac_permissions`, `mac_network_status`).
@@ -39,6 +41,11 @@ All shipped (14 tools), each verified live:
   (`mac_click`, `mac_type`, `mac_scroll`, `mac_key`, `mac_computer`).
 - **Phase 4 ✅** — per-app network **metadata** via `lsof` (`mac_read_network`): remote
   host/port/state, works on every app including cert-pinned ones.
+- **v0.2 ✅** — drag (`mac_drag`), window management (`mac_window`: move/resize/minimize/
+  close/raise/list), waiting (`mac_wait_for`), and one-shot/batch flows (`mac_click` by
+  query, `mac_do`). Driving an app never raises it or steals focus — control clicks go
+  through Accessibility (`AXPress`) — the sole exception being a drag, which needs a real
+  mouse-down.
 
 Network **body** capture (decrypting request/response payloads) is intentionally out of scope:
 it would require a transparent-proxy system extension + a trusted root CA, which needs a paid
@@ -58,6 +65,18 @@ The installed app owns macOS TCC grants for Accessibility and Screen Recording. 
 the bundle is ad-hoc signed; set `MACMCP_SIGN_IDENTITY` to a stable code-signing identity
 before `make package` or `make install` if you want to grant those permissions once and keep
 them across rebuilds.
+
+**Prebuilt** — each [release](https://github.com/erwinzhang7/macMCP/releases) attaches a
+`macMCP.app.zip` built by CI. It's **ad-hoc signed and not notarized** (no Developer ID), so
+after unzipping you must clear quarantine before it'll open:
+
+```sh
+xattr -dr com.apple.quarantine macMCP.app && mv macMCP.app /Applications/
+```
+
+Because the ad-hoc signature changes per build, TCC grants won't persist across versions —
+**building from source with your own signing identity (`make install`) is recommended** for
+regular use.
 
 ## Security model
 

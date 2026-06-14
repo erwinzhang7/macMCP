@@ -44,5 +44,5 @@ do {
         })
 }
 
-let server = MCPServer(name: "macmcp", version: "0.1.1", registry: registry)
+let server = MCPServer(name: "macmcp", version: "0.2.0", registry: registry)
 server.run()

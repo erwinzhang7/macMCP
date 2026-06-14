@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: swift --version && sw_vers
+
+      - name: Build
+        run: swift build
+
+      # The self-test launches the menu-bar agent; it works on a GUI-capable runner but the
+      # NSStatusItem creation can be flaky headless, so it's informational — the build is the gate.
+      - name: Protocol self-test
+        continue-on-error: true
+        run: python3 test/protocol_selftest.py
