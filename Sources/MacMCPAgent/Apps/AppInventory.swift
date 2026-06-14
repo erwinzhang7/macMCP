@@ -89,7 +89,7 @@ final class AppInventory {
     /// Resolve a tool's target app from `bundleId` (preferred) or `pid`. For multi-process
     /// (Electron) apps, prefer the regular-activation-policy instance that owns the UI.
     func resolve(_ args: Args) throws -> AppRecord {
-        if let bundleId = args.string("bundleId") {
+        if let bundleId = args.string("bundleId"), !bundleId.isEmpty {
             let matches = NSWorkspace.shared.runningApplications.filter {
                 $0.bundleIdentifier == bundleId
             }

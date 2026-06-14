@@ -696,12 +696,30 @@ final class ToolRouter {
             }
             win = w
         }
-        let backing = NSScreen.main?.backingScaleFactor ?? 2.0
+        let backing = backingScale(forWindowBounds: win.bounds)
         let pointW = max(1, win.bounds.width)
         let scale: CGFloat = maxWidth.map { min(backing, CGFloat($0) / pointW) } ?? backing
         let pw = max(1, Int((win.bounds.width * scale).rounded()))
         let ph = max(1, Int((win.bounds.height * scale).rounded()))
         return (win.bounds.origin, scale, win.windowId, win.bounds, pw, ph)
+    }
+
+    /// Backing scale of the display the window actually sits on. CGWindowList bounds are global
+    /// top-left points; NSScreen frames are bottom-left, so flip through the primary screen's
+    /// height to find the containing screen (fixes click/scale accuracy on multi-monitor setups).
+    private func backingScale(forWindowBounds bounds: CGRect) -> CGFloat {
+        let screens = NSScreen.screens
+        guard let primary = screens.first else { return 2.0 }
+        let primaryHeight = primary.frame.height
+        let center = CGPoint(x: bounds.midX, y: bounds.midY)
+        for screen in screens {
+            let f = screen.frame
+            let topLeft = CGRect(
+                x: f.origin.x, y: primaryHeight - (f.origin.y + f.height),
+                width: f.width, height: f.height)
+            if topLeft.contains(center) { return screen.backingScaleFactor }
+        }
+        return primary.backingScaleFactor
     }
 
     // MARK: - Schema helpers (mirror safari-mcp's inline JSON Schemas)
