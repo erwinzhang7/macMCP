@@ -138,6 +138,39 @@ enum AXController {
         return CGRect(origin: position, size: size)
     }
 
+    /// "Click" the actionable element at a global screen point via AXPress instead of a synthetic
+    /// mouse event. AXPress invokes the control WITHOUT activating/raising the app, so this keeps
+    /// a backgrounded app in the background and never steals the user's focus. Walks up a few
+    /// ancestors so a click on a label inside a button still finds the button. Returns false when
+    /// nothing AXPress-able is under the point (caller falls back to a synthetic click).
+    static func pressElementAt(_ point: CGPoint) -> Bool {
+        let systemWide = AXUIElementCreateSystemWide()
+        var found: AXUIElement?
+        guard
+            AXUIElementCopyElementAtPosition(
+                systemWide, Float(point.x), Float(point.y), &found) == .success,
+            var element = found
+        else { return false }
+        for _ in 0..<5 {
+            if actionNames(element).contains(kAXPressAction as String) {
+                return AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+            }
+            guard let parent = parentElement(element) else { break }
+            element = parent
+        }
+        return false
+    }
+
+    private static func parentElement(_ element: AXUIElement) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &value)
+                == .success,
+            let value, CFGetTypeID(value) == AXUIElementGetTypeID()
+        else { return nil }
+        return (value as! AXUIElement)
+    }
+
     // MARK: - Collection
 
     private static func collect(

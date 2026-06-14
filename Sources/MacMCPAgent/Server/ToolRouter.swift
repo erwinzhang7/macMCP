@@ -334,21 +334,31 @@ final class ToolRouter {
                     {
                         return .text("Pressed \(ref) on \(app.name).")
                     }
-                    // Tier B: synthetic click at the element's center.
+                    // Tier B: try AXPress on the element at the center (no app activation),
+                    // else a synthetic click.
                     guard let frame = AXController.frame(ref: ref, pid: app.pid) else {
                         throw ToolError(
                             "Ref \(ref) has no press action and no resolvable frame — re-run "
                                 + "mac_read_ui for fresh refs.")
                     }
                     let c = CGPoint(x: frame.midX, y: frame.midY)
+                    if case .left = button, clicks == 1, AXController.pressElementAt(c) {
+                        return .text("Pressed \(ref) on \(app.name) (no focus change).")
+                    }
                     try InputControl.click(
                         pid: app.pid, at: c, button: button, clicks: clicks, flags: [])
                     return .text("Clicked \(ref) at (\(Int(c.x)),\(Int(c.y))) on \(app.name).")
                 }
                 if let x = a.double("x"), let y = a.double("y") {
+                    let p = CGPoint(x: x, y: y)
+                    // Prefer a semantic press at the point (no app activation) for a single
+                    // left-click; fall back to a synthetic click for non-actionable spots.
+                    if case .left = button, clicks == 1, AXController.pressElementAt(p) {
+                        return .text(
+                            "Pressed element at (\(Int(x)),\(Int(y))) on \(app.name) (no focus change).")
+                    }
                     try InputControl.click(
-                        pid: app.pid, at: CGPoint(x: x, y: y), button: button, clicks: clicks,
-                        flags: [])
+                        pid: app.pid, at: p, button: button, clicks: clicks, flags: [])
                     return .text("Clicked (\(Int(x)),\(Int(y))) on \(app.name).")
                 }
                 throw ToolError("Provide 'ref' (preferred) or both 'x' and 'y' (global points).")
@@ -507,6 +517,13 @@ final class ToolRouter {
                 case "left_click", "right_click", "double_click":
                     try ensureAXTrust()
                     let p = try globalPoint()
+                    // Single left-click: prefer a semantic AXPress at the point (no app
+                    // activation / focus steal); fall back to a synthetic click otherwise.
+                    if action == "left_click", AXController.pressElementAt(p) {
+                        return .text(
+                            "Pressed element at pixel (\(a.int("x") ?? 0),\(a.int("y") ?? 0)) "
+                                + "(no focus change).")
+                    }
                     let button: MouseButton = action == "right_click" ? .right : .left
                     let clicks = action == "double_click" ? 2 : 1
                     try InputControl.click(
