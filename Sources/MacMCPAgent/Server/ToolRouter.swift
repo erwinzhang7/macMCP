@@ -222,13 +222,12 @@ final class ToolRouter {
                         "integer", "Downscale so the image is at most this many pixels wide "
                             + "(default 1400). Smaller = faster + cheaper to process."),
                     "format": prop("string", "png (default, crisp text) or jpeg (smaller/faster)."),
-                    "bringToFront": prop(
-                        "boolean", "Activate the app before capturing. Default false."),
                 ])
             ) { [self] raw in
                 let a = Args(raw)
                 let app = try requireFull(a)
-                if a.bool("bringToFront") == true { activate(pid: app.pid) }
+                // No activation: ScreenCaptureKit captures occluded/background windows, so a
+                // screenshot never needs to raise or focus the app (won't interrupt the user).
                 // windowMapping is pid-scoped, so a foreign windowId can't be captured (ownership)
                 // and it computes the downscaled capture dimensions.
                 let jpeg = isJPEG(a.string("format"))
@@ -290,15 +289,6 @@ final class ToolRouter {
                     max: clampInt(a.int("max"), default: 25, min: 1, max: 1000))
                 return .text(jsonText(found))
             })
-    }
-
-    /// Bring an app to the front (used by mac_screenshot's bringToFront). Hops to main.
-    private func activate(pid: Int) {
-        let work: () -> Void = {
-            _ = NSRunningApplication(processIdentifier: pid_t(pid))?
-                .activate(options: [.activateAllWindows])
-        }
-        if Thread.isMainThread { work() } else { DispatchQueue.main.sync(execute: work) }
     }
 
     // MARK: - Input / control tier (Full)
